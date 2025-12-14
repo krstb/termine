@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Termine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <style>
+        /* Grundlegendes Layout für den Hauptcontainer */
+        body {
+            height: 100vh;
+            overflow: hidden; /* Verhindert das Scrollen des Bodys */
+            font-family: sans-serif;
+            background-color: #f3f4f6;
+        }
+
+        .main-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            max-width: 768px; /* Oder eine feste Breite wie 600px */
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 1rem;
+            background-color: #f3f4f6;
+            overflow-y: auto; /* Erlaubt dem Hauptcontainer, zu scrollen */
+            margin: 0 auto;
+            left: 50%;
+            transform: translateX(-50%);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border-radius: 0.5rem;
+        }
+
+        /* Overlay für den Ladezustand */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(255, 255, 255, 0.8);
+            backdrop-filter: blur(4px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        /* Positionierung für die Nachrichtenbox, relativ zum Formular-Container */
+        .message-container {
+            position: relative;
+            min-height: 40px; /* Platz für die Nachricht lassen */
+        }
+        
+        /* Spezifisches Styling für die Rückgängig-Schaltfläche */
+        .undo-button {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            transition: opacity 0.3s ease-in-out;
+        }
+
+        /* Styling für die Bestätigungs-Modals */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(2px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background-color: white;
+            padding: 2.5rem;
+            border-radius: 1.5rem;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+            border: 1px solid #e5e7eb;
+            max-width: 400px;
+            text-align: center;
+        }
+        
+        /* Styling für überlappende Termine */
+        .overlap-item {
+            background-color: #fee2e2; /* light red */
+            border-color: #ef4444; /* red */
+        }
+        
+        .overlap-item .text-gray-900,
+        .overlap-item .text-gray-600,
+        .overlap-item .text-gray-500 {
+            color: #ef4444; /* red */
+        }
+
+        /* Styling für die Scrollbalken-Container */
+        .scroll-container {
+            /* Höhe basierend auf 3 Terminelementen plus Abstand */
+            max-height: 24rem;
+            overflow-y: auto;
+        }
+        
+        /* Styling für den Webkit-Scrollbalken (Chrome, Safari, Edge) */
+        .scroll-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .scroll-container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .scroll-container::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 10px;
+        }
+        .scroll-container::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        /* Hilfs-Klasse für die Höhe von Listenelementen */
+        .appointment-item {
+            /* Die Höhe wird jetzt dynamisch vom Inhalt bestimmt, keine feste min-height mehr */
+        }
+        
+        /* Transition für die älteren Termine */
+        .older-appointment {
+            transition: max-height 0.3s ease-out, opacity 0.3s ease-out, padding 0.3s ease-out, margin 0.3s ease-out;
+            overflow: hidden;
+            max-height: 0;
+            opacity: 0;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+            margin-top: 0 !important;
+            margin-bottom: 0 !important;
+        }
+        
+        .older-appointment.visible {
+            max-height: 20rem; /* Genug Platz für den Inhalt */
+            opacity: 1;
+            padding-top: 0.5rem !important;
+            padding-bottom: 0.5rem !important;
+            margin-top: 0.5rem !important;
+            margin-bottom: 0.5rem !important;
+        }
+
+    </style>
+    <script type="module">
+        // Konstanten für Standardwerte
+        const DEFAULT_DURATION_MINUTES = 30;
+        const DEFAULT_PAUSE_MINUTES = 10;
+        const STORAGE_KEY = 'terminplaner-appointments';
+
+        // Lokale Variablen
+        let appointmentsCache = [];
+        let editingAppointmentId = null;
+        let areOlderAppointmentsVisible = false;
+
+        // Neu für die Rückgängig-Funktion
+        let undoStack = [];
+        let undoTimeout;
+
+        // Neu für die Bestätigungs-Modals
+        let appointmentIdToDelete = null;
+
+        // DOM-Elemente
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const messageBox = document.getElementById('message-box');
+        const undoButton = document.getElementById('undo-btn');
+        const confirmationModal = document.getElementById('confirmation-modal');
+        const confirmDeleteBtn = document.getElementById('confirm-delete-btn');
+        const cancelDeleteBtnModal = document.getElementById('cancel-delete-btn-modal');
+        const overlapModal = document.getElementById('overlap-modal');
+        const confirmOverlapBtn = document.getElementById('confirm-overlap-btn');
+        const cancelOverlapBtn = document.getElementById('cancel-overlap-btn');
+        const overlapMessage = document.getElementById('overlap-message');
+        const deleteInEditBtn = document.getElementById('delete-in-edit-btn');
+        const toggleOlderAppointmentsBtn = document.getElementById('toggle-older-appointments-btn');
+        
+        // Formular und Button-Elemente
+        const formContainer = document.getElementById('appointment-form-container');
+        const addAppointmentBtn = document.getElementById('add-appointment-btn');
+        const form = document.getElementById('appointment-form');
+        const appointmentDatetimeInput = document.getElementById('appointment-datetime');
+        const descriptionInput = document.getElementById('appointment-description');
+        const durationSelect = document.getElementById('appointment-duration');
+        const pauseSelect = document.getElementById('appointment-pause');
+        const appointmentList = document.getElementById('appointment-list');
+        const freeTimeList = document.getElementById('free-time-list');
+        const formSubmitBtn = document.getElementById('form-submit-btn');
+        const formCancelEditBtn = document.getElementById('cancel-edit-btn');
+
+        let messageTimeout;
+
+        // ######################################
+        // LOKALE SPEICHERFUNKTIONEN
+        // ######################################
+
+        function loadAppointmentsFromLocalStorage() {
+            try {
+                const appointmentsJSON = localStorage.getItem(STORAGE_KEY);
+                const appointments = appointmentsJSON ? JSON.parse(appointmentsJSON) : [];
+                if (!Array.isArray(appointments)) {
+                    console.error("Daten aus localStorage sind beschädigt oder kein Array. Initialisiere mit leerem Array.");
+                    return [];
+                }
+                return appointments;
+            } catch (error) {
+                console.error("Fehler beim Laden oder Parsen der Daten aus localStorage:", error);
+                return [];
+            }
+        }
+
+        function saveAppointmentsToLocalStorage() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(appointmentsCache));
+        }
+
+        function refreshAppointments() {
+            saveAppointmentsToLocalStorage();
+            processAndRenderAppointments(appointmentsCache);
+        }
+
+        // ######################################
+        // INITIALISIERUNG
+        // ######################################
+
+        function initializeApp() {
+            try {
+                appointmentsCache = loadAppointmentsFromLocalStorage();
+                processAndRenderAppointments(appointmentsCache);
+            } catch (error) {
+                console.error("Fehler bei der Initialisierung der App:", error);
+                showMessage("Ein Fehler ist aufgetreten. Bitte laden Sie die Seite neu.", true);
+            } finally {
+                loadingOverlay.classList.add('hidden');
+            }
+        }
+
+        // Funktion zum Überprüfen, ob ein Zeitfenster bereits gebucht ist
+        function isTimeSlotBooked(newApptDatetime, newApptDuration, newApptPause, appointmentsToSearch, excludeId = null) {
+            return new Promise((resolve, reject) => {
+                const newStart = new Date(newApptDatetime);
+                const newEnd = new Date(newStart.getTime() + (newApptDuration + newApptPause) * 60000);
+
+                const overlappingAppt = appointmentsToSearch.find(appt => {
+                    if (appt.id === excludeId) return false;
+
+                    const existingStart = new Date(appt.datetime);
+                    const existingDuration = parseInt(appt.duration, 10) || DEFAULT_DURATION_MINUTES;
+                    const existingPause = parseFloat(appt.pause) || DEFAULT_PAUSE_MINUTES;
+                    const existingEnd = new Date(existingStart.getTime() + (existingDuration + existingPause) * 60000);
+
+                    return newStart < existingEnd && newEnd > existingStart;
+                });
+
+                if (overlappingAppt) {
+                    // Berechnung der Dauer der Überschneidung
+                    const overlapStart = newStart > new Date(overlappingAppt.datetime) ? newStart : new Date(overlappingAppt.datetime);
+                    const existingApptEnd = new Date(new Date(overlappingAppt.datetime).getTime() + (parseInt(overlappingAppt.duration, 10) + parseFloat(overlappingAppt.pause)) * 60000);
+                    const overlapEnd = newEnd < existingApptEnd ? newEnd : existingApptEnd;
+                    const overlapMinutes = (overlapEnd.getTime() - overlapStart.getTime()) / 60000;
+                    const formattedOverlapDuration = formatDuration(overlapMinutes);
+
+                    overlapMessage.innerHTML = `Der Termin von ${formatTime(newApptDatetime)} bis ${formatTime(newEnd.toISOString())} Uhr überschneidet sich um ${formattedOverlapDuration} mit dem Termin "${overlappingAppt.description}". Möchten Sie trotzdem fortfahren?`;
+                    overlapModal.classList.remove('hidden');
+
+                    confirmOverlapBtn.onclick = () => {
+                        overlapModal.classList.add('hidden');
+                        resolve(true); // Überlappung akzeptiert
+                    };
+                    cancelOverlapBtn.onclick = () => {
+                        overlapModal.classList.add('hidden');
+                        reject(new Error("Terminbuchung abgebrochen.")); // Überlappung abgelehnt
+                    };
+                } else {
+                    resolve(true); // Keine Überlappung
+                }
+            });
+        }
+
+        // Hilfsfunktion zum Formatieren eines Datums für die Anzeige
+        function formatDate(datetimeString) {
+            const date = new Date(datetimeString);
+            const options = {
+                weekday: 'short',
+                year: '2-digit',
+                month: '2-digit',
+                day: '2-digit'
+            };
+            return new Intl.DateTimeFormat('de-DE', options).format(date);
+        }
+
+        // Hilfsfunktion zum Formatieren einer Uhrzeit für die Anzeige
+        function formatTime(datetimeString) {
+            const date = new Date(datetimeString);
+            const options = {
+                hour: '2-digit',
+                minute: '2-digit',
+                hourCycle: 'h23'
+            };
+            return new Intl.DateTimeFormat('de-DE', options).format(date);
+        }
+
+        // Hilfsfunktion zum Formatieren der Dauer in Stunden und Minuten
+        function formatDuration(totalMinutes) {
+            // Runden der Minuten auf die nächste ganze Zahl
+            totalMinutes = Math.round(totalMinutes);
+            
+            if (totalMinutes === 0) return '0 Min.';
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+            let durationString = '';
+            if (hours > 0) {
+                durationString += `${hours} Std. `;
+            }
+            if (minutes > 0) {
+                durationString += `${minutes} Min.`;
+            }
+            return durationString.trim();
+        }
+
+        // Hilfsfunktion für Nachrichten
+        function showMessage(message, isError = false) {
+            clearTimeout(messageTimeout);
+
+            messageBox.textContent = message;
+            messageBox.className = isError
+                ? 'absolute -bottom-10 left-1/2 -translate-x-1/2 p-2 rounded-xl text-sm font-semibold text-white bg-red-500 shadow-md transition-opacity duration-300 ease-in-out opacity-100 z-50'
+                : 'absolute -bottom-10 left-1/2 -translate-x-1/2 p-2 rounded-xl text-sm font-semibold text-white bg-green-500 shadow-md transition-opacity duration-300 ease-in-out opacity-100 z-50';
+
+            messageTimeout = setTimeout(() => {
+                messageBox.classList.remove('opacity-100');
+                messageBox.classList.add('opacity-0');
+            }, 3000);
+        }
+
+        function toggleFormVisibility() {
+            formContainer.classList.toggle('hidden');
+            addAppointmentBtn.classList.toggle('hidden');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // Setzt das Formular in den "Hinzufügen"-Modus zurück
+        function setFormToAddMode() {
+            editingAppointmentId = null;
+            form.reset();
+            formSubmitBtn.textContent = 'Termin hinzufügen';
+            formCancelEditBtn.classList.add('hidden');
+            deleteInEditBtn.classList.add('hidden');
+            formContainer.classList.add('hidden');
+            addAppointmentBtn.classList.remove('hidden');
+
+            // Aktuelles Datum und Uhrzeit vorbelegen
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            appointmentDatetimeInput.value = `${year}-${month}-${day}T${hours}:${minutes}`;
+        }
+
+        // Setzt das Formular in den "Bearbeiten"-Modus
+        function setFormToEditMode(appointment) {
+            editingAppointmentId = appointment.id;
+
+            appointmentDatetimeInput.value = appointment.datetime.substring(0, 16); // Entfernt Sekunden und Zeitzoneninformation
+            descriptionInput.value = appointment.description;
+            durationSelect.value = appointment.duration;
+            pauseSelect.value = appointment.pause;
+
+            formSubmitBtn.textContent = 'Termin aktualisieren';
+            formCancelEditBtn.classList.remove('hidden');
+            deleteInEditBtn.classList.remove('hidden');
+            
+            // Stelle sicher, dass das Formular sichtbar ist, wenn es zum Bearbeiten geöffnet wird
+            if (formContainer.classList.contains('hidden')) {
+                toggleFormVisibility();
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeApp();
+        });
+
+        // Hinzufügen der Rückgängig-Funktion
+        function showUndoButton(action, data) {
+            clearTimeout(undoTimeout);
+            undoStack.push({ action, data });
+            undoButton.classList.remove('hidden', 'opacity-0');
+
+            undoTimeout = setTimeout(() => {
+                undoButton.classList.add('opacity-0');
+                setTimeout(() => undoButton.classList.add('hidden'), 300); // Warten auf das Ende der Transition
+                undoStack = [];
+            }, 5000);
+        }
+
+        function undoLastAction() {
+            const lastAction = undoStack.pop();
+            if (!lastAction) {
+                showMessage("Keine Aktion zum Rückgängigmachen vorhanden.", true);
+                return;
+            }
+
+            try {
+                if (lastAction.action === 'DELETE') {
+                    appointmentsCache.push(lastAction.data);
+                    showMessage("Löschen rückgängig gemacht.");
+                } else if (lastAction.action === 'ADD') {
+                    appointmentsCache = appointmentsCache.filter(appt => appt.id !== lastAction.data.id);
+                    showMessage("Hinzufügen rückgängig gemacht.");
+                } else if (lastAction.action === 'UPDATE') {
+                    const index = appointmentsCache.findIndex(appt => appt.id === lastAction.data.id);
+                    if (index > -1) {
+                        appointmentsCache[index] = lastAction.data;
+                    }
+                    showMessage("Bearbeitung rückgängig gemacht.");
+                }
+                refreshAppointments();
+            } catch (e) {
+                console.error("Fehler beim Rückgängigmachen:", e);
+                showMessage("Fehler beim Rückgängigmachen der Aktion.", true);
+            }
+            undoButton.classList.add('hidden');
+            undoStack = [];
+        }
+
+        undoButton.addEventListener('click', undoLastAction);
+        
+        /**
+         * Funktion zur Berechnung der freien und gebuchten Zeit.
+         * Korrigierte Logik, um Termine korrekt aus den freien Slots zu entfernen.
+         */
+        function calculateDailySummary(appointments) {
+            const freeSlots = {};
+            const bookedTime = {};
+            
+            const appointmentsByDate = {};
+            appointments.forEach(appt => {
+                const date = appt.datetime.split('T')[0];
+                if (!appointmentsByDate[date]) {
+                    appointmentsByDate[date] = [];
+                }
+                appointmentsByDate[date].push(appt);
+            });
+
+            for (const date in appointmentsByDate) {
+                const appts = appointmentsByDate[date].sort((a, b) => a.datetime.localeCompare(b.datetime));
+                const dayOfWeek = new Date(date + 'T00:00:00').getDay();
+                
+                // Nur Wochentage (Mo=1 bis Fr=5)
+                if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+                    let totalBookedMinutes = 0;
+                    
+                    // Gebuchte Zeitfenster als 'Intervalle' berechnen
+                    const bookedIntervals = appts.map(appt => {
+                        const duration = parseInt(appt.duration, 10) || DEFAULT_DURATION_MINUTES;
+                        const pause = parseFloat(appt.pause) || DEFAULT_PAUSE_MINUTES;
+                        const start = new Date(appt.datetime);
+                        const end = new Date(start.getTime() + (duration + pause) * 60000);
+                        totalBookedMinutes += duration + pause;
+                        return { start, end };
+                    });
+
+                    bookedTime[date] = totalBookedMinutes;
+
+                    // Freie Zeitfenster berechnen
+                    let currentFreeSlots = [];
+                    const workDayStart = new Date(date + 'T08:00:00');
+                    const workDayEnd = new Date(date + 'T20:00:00');
+                    let lastEnd = workDayStart;
+
+                    bookedIntervals.forEach(interval => {
+                        // Wenn es eine Lücke zwischen dem letzten Termin und dem aktuellen gibt
+                        if (interval.start > lastEnd) {
+                            currentFreeSlots.push({
+                                start: lastEnd,
+                                end: interval.start
+                            });
+                        }
+                        // Update den letzten Endpunkt zur aktuellen Endzeit, aber nur wenn es über den letzten Termin hinausgeht
+                        lastEnd = new Date(Math.max(lastEnd.getTime(), interval.end.getTime()));
+                    });
+
+                    // Füge das letzte freie Zeitfenster nach dem letzten Termin hinzu
+                    if (lastEnd < workDayEnd) {
+                        currentFreeSlots.push({
+                            start: lastEnd,
+                            end: workDayEnd
+                        });
+                    }
+
+                    freeSlots[date] = currentFreeSlots.map(slot => ({
+                        start: `${String(slot.start.getHours()).padStart(2, '0')}:${String(slot.start.getMinutes()).padStart(2, '0')}`,
+                        end: `${String(slot.end.getHours()).padStart(2, '0')}:${String(slot.end.getMinutes()).padStart(2, '0')}`,
+                        duration: (slot.end.getTime() - slot.start.getTime()) / (1000 * 60)
+                    }));
+                }
+            }
+            return { freeSlots, bookedTime };
+        }
+        
+        // Funktion zum Rendern der täglichen Zusammenfassung
+        function renderDailySummary(summary) {
+            freeTimeList.innerHTML = '';
+            const sortedDates = Object.keys(summary.freeSlots).sort();
+
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            if (sortedDates.length === 0) {
+                 freeTimeList.innerHTML = '<li class="py-4 px-6 bg-white rounded-2xl shadow-sm text-center text-gray-500">Für Wochentage wurden keine Termine gefunden.</li>';
+                 return;
+            }
+
+            sortedDates.forEach(date => {
+                const dayDate = new Date(date);
+                dayDate.setHours(0, 0, 0, 0);
+                
+                // Freie Slots in der Vergangenheit ausblenden
+                if (dayDate < today) {
+                    return;
+                }
+
+                const dailyFreeSlots = summary.freeSlots[date];
+                const dailyBookedTime = summary.bookedTime[date];
+
+                const li = document.createElement('li');
+                li.className = 'py-4 px-4 sm:px-6 bg-white rounded-2xl shadow-xl border border-gray-100 transition-transform transform hover:scale-[1.01]';
+
+                let slotsHtml = '';
+                if (dailyFreeSlots && dailyFreeSlots.length > 0) {
+                    slotsHtml = dailyFreeSlots.filter(slot => slot.duration > 0).map(slot => {
+                        const duration = formatDuration(slot.duration);
+                        return `<p class="text-sm text-gray-700">${slot.start} - ${slot.end} | Frei: ${duration}</p>`;
+                    }).join('');
+                }
+                if (slotsHtml === '') {
+                    slotsHtml = '<p class="text-sm italic text-gray-500">Keine freie Zeit innerhalb der Arbeitszeiten.</p>';
+                }
+
+                li.innerHTML = `
+                    <p class="text-lg text-gray-800">${new Date(date + 'T00:00:00').toLocaleDateString('de-DE', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' })}</p>
+                    <div class="mt-1 space-y-1">
+                        ${slotsHtml}
+                    </div>
+                `;
+                freeTimeList.appendChild(li);
+            });
+        }
+
+        // Funktion zum Rendern der Termine in der Liste
+        function processAndRenderAppointments(appointments) {
+            const dailySummary = calculateDailySummary(appointments);
+            renderDailySummary(dailySummary);
+        
+            appointmentList.innerHTML = '';
+            
+            appointments.sort((a, b) => new Date(a.datetime) - new Date(b.datetime));
+            
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+        
+            let hasOlderAppointments = false;
+        
+            appointments.forEach(appt => {
+                const apptDate = new Date(appt.datetime);
+                apptDate.setHours(0, 0, 0, 0);
+                const isOlder = apptDate < today;
+                
+                if (isOlder) {
+                    hasOlderAppointments = true;
+                }
+                
+                const li = document.createElement('li');
+                const isOverlapping = isAppointmentOverlapping(appt, appointments);
+                const liClasses = `flex flex-col items-start gap-y-1 py-2 px-3 sm:px-4 rounded-xl shadow-md border border-gray-100 bg-white cursor-pointer transition transform hover:scale-[1.01] ${isOverlapping ? 'overlap-item' : ''} ${isOlder ? 'older-appointment' : ''} appointment-item`;
+                li.className = liClasses;
+                li.dataset.id = appt.id; // Füge die ID zum li-Element hinzu
+        
+                const dateStr = formatDate(appt.datetime);
+                const timeStr = formatTime(appt.datetime);
+                const duration = parseInt(appt.duration, 10) || DEFAULT_DURATION_MINUTES;
+                const pause = parseFloat(appt.pause) || DEFAULT_PAUSE_MINUTES;
+                const end = new Date(new Date(appt.datetime).getTime() + (duration + pause) * 60000);
+                const endTimeStr = formatTime(end.toISOString());
+                const totalDuration = formatDuration(duration + pause);
+        
+                li.innerHTML = `
+                    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between w-full">
+                        <div class="flex-1 min-w-0">
+                            <div class="flex flex-wrap items-baseline gap-x-2">
+                                <span class="text-sm text-gray-600 whitespace-nowrap">${dateStr.replace(',', '')}</span>
+                                <span class="text-sm text-gray-600 whitespace-nowrap">${timeStr} - ${endTimeStr} Uhr</span>
+                                <span class="text-sm text-gray-500 whitespace-nowrap hidden sm:block"> | Dauer: ${formatDuration(duration)} | Pause: ${formatDuration(pause)}</span>
+                            </div>
+                            <span class="text-base text-gray-900 font-semibold truncate block mt-1 sm:mt-0" title="${appt.description}">
+                                ${appt.description}
+                            </span>
+                        </div>
+                    </div>
+                `;
+                appointmentList.appendChild(li);
+            });
+            
+            if (hasOlderAppointments) {
+                toggleOlderAppointmentsBtn.classList.remove('hidden');
+            } else {
+                toggleOlderAppointmentsBtn.classList.add('hidden');
+            }
+        
+            // Setze den initialen Zustand des Buttons
+            if (areOlderAppointmentsVisible) {
+                toggleOlderAppointmentsBtn.innerHTML = `<i class="fas fa-chevron-up mr-2"></i>Ältere Termine ausblenden`;
+                appointmentList.querySelectorAll('.older-appointment').forEach(el => el.classList.add('visible'));
+            } else {
+                toggleOlderAppointmentsBtn.innerHTML = `<i class="fas fa-chevron-down mr-2"></i>Ältere Termine anzeigen`;
+                appointmentList.querySelectorAll('.older-appointment').forEach(el => el.classList.remove('visible'));
+            }
+        
+            if (appointments.length === 0) {
+                appointmentList.innerHTML = '<li class="py-4 px-6 text-gray-500 italic text-center">Keine Termine gefunden.</li>';
+            }
+        }
+        
+        function isAppointmentOverlapping(targetAppt, allAppointments) {
+            const targetStart = new Date(targetAppt.datetime);
+            const targetDuration = parseInt(targetAppt.duration, 10) || DEFAULT_DURATION_MINUTES;
+            const targetPause = parseFloat(targetAppt.pause) || DEFAULT_PAUSE_MINUTES;
+            const targetEnd = new Date(targetStart.getTime() + (targetDuration + targetPause) * 60000);
+            
+            for (const appt of allAppointments) {
+                if (appt.id === targetAppt.id) continue;
+                
+                const existingStart = new Date(appt.datetime);
+                const existingDuration = parseInt(appt.duration, 10) || DEFAULT_DURATION_MINUTES;
+                const existingPause = parseFloat(appt.pause) || DEFAULT_PAUSE_MINUTES;
+                const existingEnd = new Date(existingStart.getTime() + (existingDuration + existingPause) * 60000);
+
+                if (targetStart < existingEnd && targetEnd > existingStart) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Terminverarbeitung
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const datetime = appointmentDatetimeInput.value;
+            const description = descriptionInput.value.trim();
+            const duration = parseInt(durationSelect.value, 10) || DEFAULT_DURATION_MINUTES;
+            const pause = parseFloat(pauseSelect.value) || DEFAULT_PAUSE_MINUTES;
+
+            if (!datetime || !description) {
+                showMessage("Bitte geben Sie ein gültiges Datum, eine Uhrzeit und eine Beschreibung ein.", true);
+                return;
+            }
+
+            try {
+                // Überprüfung auf Überschneidung
+                await isTimeSlotBooked(datetime, duration, pause, appointmentsCache, editingAppointmentId);
+
+                if (editingAppointmentId) {
+                    const index = appointmentsCache.findIndex(appt => appt.id === editingAppointmentId);
+                    if (index > -1) {
+                        const oldApptData = { ...appointmentsCache[index] };
+                        appointmentsCache[index] = { ...oldApptData, datetime, duration, pause, description };
+                        showMessage("Termin erfolgreich aktualisiert!");
+                        showUndoButton('UPDATE', oldApptData);
+                        setFormToAddMode();
+                    }
+                } else {
+                    const newAppointment = {
+                        id: crypto.randomUUID(),
+                        datetime,
+                        duration,
+                        pause,
+                        description,
+                        createdAt: new Date().toISOString()
+                    };
+                    appointmentsCache.push(newAppointment);
+                    showMessage("Termin '" + description + "' erfolgreich hinzugefügt!");
+                    showUndoButton('ADD', { ...newAppointment });
+                    setFormToAddMode();
+                }
+                refreshAppointments();
+            } catch (error) {
+                showMessage(error.message, true);
+            }
+        });
+        
+        // Event-Handler für das Ein- und Ausblenden alter Termine
+        toggleOlderAppointmentsBtn.addEventListener('click', () => {
+            areOlderAppointmentsVisible = !areOlderAppointmentsVisible;
+            const olderAppointments = appointmentList.querySelectorAll('.older-appointment');
+            
+            if (areOlderAppointmentsVisible) {
+                olderAppointments.forEach(el => el.classList.add('visible'));
+                toggleOlderAppointmentsBtn.innerHTML = `<i class="fas fa-chevron-up mr-2"></i>Ältere Termine ausblenden`;
+            } else {
+                olderAppointments.forEach(el => el.classList.remove('visible'));
+                toggleOlderAppointmentsBtn.innerHTML = `<i class="fas fa-chevron-down mr-2"></i>Ältere Termine anzeigen`;
+            }
+        });
+
+        // Event-Delegation für das Klicken auf das Termin-Element
+        appointmentList.addEventListener('click', (e) => {
+            const appointmentItem = e.target.closest('li[data-id]');
+            if (appointmentItem) {
+                const appointmentId = appointmentItem.dataset.id;
+                const appointmentToEdit = appointmentsCache.find(appt => appt.id === appointmentId);
+                if (appointmentToEdit) {
+                    setFormToEditMode(appointmentToEdit);
+                    showMessage("Termin zum Bearbeiten geladen.");
+                }
+            }
+        });
+
+        // Event-Handler für das Bestätigungs-Modal
+        confirmDeleteBtn.addEventListener('click', () => {
+            if (appointmentIdToDelete) {
+                try {
+                    const deletedApptData = appointmentsCache.find(appt => appt.id === appointmentIdToDelete);
+                    appointmentsCache = appointmentsCache.filter(appt => appt.id !== appointmentIdToDelete);
+
+                    showMessage("Termin erfolgreich gelöscht.");
+                    if (editingAppointmentId === appointmentIdToDelete) {
+                        setFormToAddMode();
+                    }
+                    showUndoButton('DELETE', deletedApptData);
+                    refreshAppointments();
+                } catch (error) {
+                }
+            }
+            confirmationModal.classList.add('hidden');
+            appointmentIdToDelete = null;
+        });
+
+        cancelDeleteBtnModal.addEventListener('click', () => {
+            confirmationModal.classList.add('hidden');
+            appointmentIdToDelete = null;
+        });
+        
+        // Event-Handler für den neuen Lösch-Button im Formular
+        deleteInEditBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (editingAppointmentId) {
+                appointmentIdToDelete = editingAppointmentId;
+                confirmationModal.classList.remove('hidden');
+            }
+        });
+
+        // Event-Handler für den "Bearbeitung abbrechen"-Button
+        formCancelEditBtn.addEventListener('click', () => {
+            setFormToAddMode();
+        });
+
+        // Event-Handler für den "Termin hinzufügen"-Button
+        addAppointmentBtn.addEventListener('click', () => {
+            formContainer.classList.remove('hidden');
+            addAppointmentBtn.classList.add('hidden');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            // Aktuelles Datum und Uhrzeit vorbelegen, wenn das Formular geöffnet wird
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            appointmentDatetimeInput.value = `${year}-${month}-${day}T${hours}:${minutes}`;
+        });
+
+    </script>
+</head>
+<body class="bg-gray-50 font-sans leading-normal tracking-normal">
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-indigo-500"></div>
+    </div>
+    
+    <div class="main-container">
+        <h1 class="text-3xl sm:text-4xl font-extrabold mb-4 text-center text-gray-800">Termine</h1>
+        
+        <div id="add-appointment-btn-container" class="text-center mb-8">
+            <button id="add-appointment-btn" class="bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-indigo-700 transition transform hover:scale-105 shadow-lg">
+                <i class="fas fa-plus mr-2"></i>Neuen Termin hinzufügen
+            </button>
+        </div>
+        
+        <div id="appointment-form-container" class="bg-white p-4 sm:p-8 rounded-3xl shadow-xl border border-gray-100 mb-8 hidden">
+            <div class="message-container">
+                <form id="appointment-form" class="space-y-4">
+                    <div>
+                        <label for="appointment-datetime" class="block text-sm text-gray-700 mb-1">Datum & Uhrzeit</label>
+                        <input type="datetime-local" id="appointment-datetime" required class="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition font-mono shadow-sm">
+                    </div>
+                    <div>
+                        <label for="appointment-description" class="block text-sm text-gray-700 mb-1">Beschreibung</label>
+                        <input type="text" id="appointment-description" placeholder="Beschreibung des Termins..." required class="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition shadow-sm">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label for="appointment-duration" class="block text-sm text-gray-700 mb-1">Dauer</label>
+                            <select id="appointment-duration" class="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition shadow-sm">
+                                <option value="30" selected>30 Min.</option>
+                                <option value="45">45 Min.</option>
+                                <option value="60">60 Min.</option>
+                                <option value="90">90 Min.</option>
+                                <option value="120">120 Min.</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="appointment-pause" class="block text-sm text-gray-700 mb-1">Pause danach</label>
+                            <select id="appointment-pause" class="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition shadow-sm">
+                                <option value="0.1">0 Min.</option>
+                                <option value="10" selected>10 Min.</option>
+                                <option value="20">20 Min.</option>
+                                <option value="30">30 Min.</option>
+                                <option value="60">60 Min.</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4">
+                        <button type="submit" id="form-submit-btn" class="flex-1 bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 transition transform hover:scale-105 shadow-lg">
+                            Termin hinzufügen
+                        </button>
+                        <button type="button" id="delete-in-edit-btn" class="hidden flex-1 bg-red-500 text-white font-bold py-3 rounded-xl hover:bg-red-600 transition transform hover:scale-105 shadow-lg">
+                            <i class="fas fa-trash-alt mr-2"></i>Termin löschen
+                        </button>
+                        <button type="button" id="cancel-edit-btn" class="flex-1 bg-gray-300 text-gray-700 font-bold py-3 rounded-xl hover:bg-gray-400 transition transform hover:scale-105 shadow-lg">
+                            Bearbeitung abbrechen
+                        </button>
+                    </div>
+                </form>
+                <div id="message-box" class="absolute -bottom-10 left-1/2 -translate-x-1/2 p-2 rounded-xl text-sm font-semibold text-white transition-opacity duration-300 ease-in-out opacity-0 z-50"></div>
+            </div>
+        </div>
+        
+        <div class="grid grid-cols-1 gap-8">
+            <div class="space-y-2">
+                <h2 class="text-xl sm:text-2xl font-extrabold text-gray-800 mb-2">Gebuchte Termine</h2>
+                
+                <button id="toggle-older-appointments-btn" class="hidden flex items-center justify-center w-full px-4 py-2 border-b-2 border-gray-300 text-gray-500 hover:text-gray-700 transition duration-150 ease-in-out">
+                    <i class="fas fa-chevron-down mr-2"></i>Ältere Termine anzeigen
+                </button>
+                
+                <div class="scroll-container space-y-2">
+                    <ul id="appointment-list" class="space-y-2"></ul>
+                </div>
+            </div>
+    
+            <div class="space-y-4">
+                <h2 class="text-xl sm:text-2xl font-extrabold text-gray-800">Freie Zeitfenster</h2>
+                <p class="text-sm italic text-gray-500">Mo. - Fr., 8:00 - 20:00 Uhr</p>
+                <div class="scroll-container space-y-4">
+                    <ul id="free-time-list" class="space-y-4 list-none"></ul>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <button id="undo-btn" class="undo-button hidden opacity-0 px-6 py-3 bg-green-600 text-white rounded-xl shadow-lg hover:bg-green-700 transition-all duration-300 ease-in-out">
+        <i class="fas fa-undo mr-2"></i>Termin gebucht
+    </button>
+
+    <div id="confirmation-modal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <h3 class="text-2xl font-bold mb-4">Termin löschen</h3>
+            <p class="text-lg text-gray-700 mb-6">Möchten Sie diesen Termin wirklich löschen?</p>
+            <div class="flex justify-center space-x-4">
+                <button id="confirm-delete-btn" class="bg-red-500 text-white font-semibold py-2 px-6 rounded-xl hover:bg-red-600 transition transform hover:scale-105 shadow-md">
+                    Löschen
+                </button>
+                <button id="cancel-delete-btn-modal" class="bg-gray-200 text-gray-700 font-semibold py-2 px-6 rounded-xl hover:bg-gray-300 transition transform hover:scale-105 shadow-md">
+                    Abbrechen
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="overlap-modal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <h3 class="text-2xl font-bold mb-4">Terminüberschneidung</h3>
+            <p id="overlap-message" class="text-lg text-gray-700 mb-6">Möchten Sie trotzdem fortfahren?</p>
+            <div class="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4">
+                <button id="confirm-overlap-btn" class="bg-yellow-500 text-white font-semibold py-2 px-6 rounded-xl hover:bg-yellow-600 transition transform hover:scale-105 shadow-md">
+                    Trotzdem buchen
+                </button>
+                <button id="cancel-overlap-btn" class="bg-gray-200 text-gray-700 font-semibold py-2 px-6 rounded-xl hover:bg-gray-300 transition transform hover:scale-105 shadow-md">
+                    Abbrechen
+                </button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
